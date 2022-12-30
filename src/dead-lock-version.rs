@@ -1,15 +1,15 @@
 use std::time::Duration;
 use std::thread;
-use std::sync::{mpsc, Arc, RwLock};
+use std::sync::{mpsc, Arc, Mutex, RwLock};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 struct Timer {
     duration: Duration,
-    tx: mpsc::SyncSender<State>,
+    tx: mpsc::SyncSender<()>,
 }
 
 impl Timer {
-    fn new(duration: Duration, tx: mpsc::SyncSender<State>) -> Self {
+    fn new(duration: Duration, tx: mpsc::SyncSender<()>) -> Self {
         Timer { duration, tx }
     }
 
@@ -18,7 +18,7 @@ impl Timer {
         let tx = self.tx.clone();
         thread::spawn(move || {
             thread::sleep(duration);
-            tx.send(State::HalfOpen).unwrap();
+            tx.send(()).unwrap();
         });
     }
 }
@@ -36,11 +36,10 @@ enum State {
 
 struct CircuitBreaker {
     state: Arc<RwLock<State>>,
-    // The transition sender of state update channel
-    state_tx: mpsc::SyncSender<State>,
     // The timer which will wait for trip_timeout duration before
     // transitioning from the open state to the half-open state
     trip_timer: Timer,
+    trip_timer_receiver: Arc<Mutex<mpsc::Receiver<()>>>,
     // The maximum number of requests allowed through in
     // the closed state
     max_failures: usize,
@@ -51,24 +50,21 @@ struct CircuitBreaker {
 
 impl CircuitBreaker {
     pub fn new(max_failures: usize, trip_timeout: Duration) -> CircuitBreaker {
-        let (state_tx, state_rx) = mpsc::sync_channel(0);
-        let timer_state_tx = state_tx.clone();
-        let cb = CircuitBreaker {
+        let (tx, rx) = mpsc::sync_channel(1);
+        CircuitBreaker {
             state: Arc::new(RwLock::new(State::Closed)),
-            state_tx,
             max_failures,
-            trip_timer: Timer::new(trip_timeout, timer_state_tx),
+            trip_timer: Timer::new(trip_timeout, tx),
+            trip_timer_receiver: Arc::new(Mutex::new(rx)),
             consecutive_failures: Arc::new(AtomicUsize::new(0)),
-        };
-        cb.spawn_state_update(state_rx);
-        cb
+        }
     }
-
+    
     pub fn call<F, T, E>(&mut self, f: F) -> Option<Result<T, E>>
     where
         F: FnOnce() -> Result<T, E>,
     {
-        let state = self.state.read().unwrap();
+        let mut state = self.state.write().unwrap();
         match *state {
             // If the circuit breaker is closed, try the request
             // and track the result
@@ -80,9 +76,10 @@ impl CircuitBreaker {
                     }
                     Some(result)
                 } else {
-                    self.state_tx.send(State::Open).unwrap();
+                    *state = State::Open;
                     self.consecutive_failures.store(0, Ordering::Relaxed);
                     self.trip_timer.start();
+                    self.spawn_trip_reset();
                     None
                 }
             }
@@ -96,26 +93,29 @@ impl CircuitBreaker {
             State::HalfOpen => {
                 let result = f();
                 if let Err(_) = result {
-                    self.state_tx.send(State::Open).unwrap();
+                    *state = State::Open;
                     self.trip_timer.start();
+                    self.spawn_trip_reset();
                 } else {
-                    self.state_tx.send(State::Closed).unwrap();
+                    *state = State::Closed;
                 }
                 Some(result)
             }
         }
     }
 
-    fn spawn_state_update(&self, state_rx: mpsc::Receiver<State>) {
+    fn spawn_trip_reset(&self) {
         let state_lock = self.state.clone();
+        let rx = self.trip_timer_receiver.clone();
         thread::spawn(move || {
-            while let Ok(new_state) = state_rx.recv() {
+            let rx = rx.lock().unwrap();
+            while let Ok(_) = rx.recv() {
                 let mut state = state_lock.write().unwrap();
-                *state = new_state;
+                *state = State::HalfOpen;
             };
         });
     }
-
+    
     fn record_failure(&self) -> usize {
         let state = self.state.read().unwrap();
         match *state {
@@ -141,25 +141,25 @@ fn main() {
     println!("    * 3 as maximum consecutive failures");
     println!("    * 10 seconds as the trip timeout");
     println!("");
-
+    
     println!("Circuit Breaker is in the initial state, which is closed.");
     // The circuit breaker is in the closed state, so the function
     // will be executed
     let result = cb.call(|| request(5));
     println!("Result for request_dice(5): {:?}", result);
-
+    
     println!("Circuit Breaker is encounting 3 errors in a row ...");
     // The function returns an error 3 times in a row, so the circuit
     // breaker transitions to the open state
     cb.call(|| request(10));
     cb.call(|| request(10));
     cb.call(|| request(10));
-
+    
     // The circuit breaker is in the open state, so the function is
     // not executed
     let result = cb.call(|| request(2));
     println!("Result for request_dice(2): {:?}", result);
-
+    
     // The circuit breaker is in the half-open state after trip_timeout
     // seconds, so the function will be executed
     println!("Let's have fun by doing nothing in 20 seconds :)");
