@@ -29,11 +29,7 @@ impl<E: fmt::Display> fmt::Display for BulkheadCallError<E> {
     }
 }
 
-impl<E> std::error::Error for BulkheadCallError<E>
-where
-    E: std::error::Error + 'static,
-{
-}
+impl<E> std::error::Error for BulkheadCallError<E> where E: std::error::Error + 'static {}
 
 #[derive(Debug)]
 struct Inner {
