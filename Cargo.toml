@@ -1,8 +1,18 @@
 [package]
-name = "circuit-breaker"
+name = "softwheel-resilience"
 version = "0.1.0"
 edition = "2021"
+rust-version = "1.75"
+description = "Composable resilience primitives for Rust distributed systems."
+repository = "https://github.com/softwheel/circuit-breaker"
+license-file = "LICENSE"
+keywords = ["resilience", "retry", "circuit-breaker", "distributed-systems"]
+categories = ["asynchronous", "concurrency", "network-programming"]
 
-# See more keys and their definitions at https://doc.rust-lang.org/cargo/reference/manifest.html
+[features]
+default = []
+tokio = ["dep:tokio"]
 
 [dependencies]
+fastrand = "2"
+tokio = { version = "1", features = ["time"], optional = true }
